@@ -181,6 +181,13 @@ struct deck_t {
 
     /* Background loading: new track data staged here, then swapped in */
     std::atomic<int> load_state;  /* 0=idle, 1=loading, 2=ready */
+    /* Loader thread is JOINABLE and joined before the next load and in
+     * destroy_deck(): a detached loader outlived the instance (it writes
+     * into this deck) and, once dsp.so is really unmapped on unload, would
+     * run unmapped code and crash the host. load_abort cuts it short. */
+    pthread_t        load_thread;
+    int              load_thread_valid;
+    std::atomic<int> load_abort;
     track_t new_tracks[NUM_STEMS];
     int    new_is_mod;
     int    new_max_frames;
@@ -1415,6 +1422,9 @@ static void *bg_load_thread(void *arg) {
 
         dk->new_is_mod = 0;
         ok = load_audio_file(&dk->new_tracks[stem_slot], path);
+        if (ok && dk->load_abort.load(std::memory_order_acquire)) {
+            ok = false; /* instance is being destroyed: skip analysis */
+        }
         if (ok) {
             dk->new_max_frames = 0;
             for (int t = 0; t < NUM_STEMS; t++)
@@ -1505,6 +1515,12 @@ static bool load_file_auto(deck_t *dk, const char *path, int stem_slot) {
         host_log("[dj] load ignored - already loading");
         return false;
     }
+    /* The previous loader has published its result; reap it (it is at most
+     * freeing its request block). */
+    if (dk->load_thread_valid) {
+        pthread_join(dk->load_thread, nullptr);
+        dk->load_thread_valid = 0;
+    }
 
     /* Snapshot all stem state NOW on the calling thread (safe — we own the data).
      * The background thread will use this snapshot instead of reading dk->tracks. */
@@ -1534,13 +1550,12 @@ static bool load_file_auto(deck_t *dk, const char *path, int stem_slot) {
     snprintf(dk->new_loaded_file, sizeof(dk->new_loaded_file), "%s", path);
     dk->new_stem_slot = stem_slot;
 
-    pthread_t thread;
     pthread_attr_t attr;
     pthread_attr_init(&attr);
-    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
     pthread_attr_setstacksize(&attr, 256 * 1024);
-    int rc = pthread_create(&thread, &attr, bg_load_thread, req);
+    int rc = pthread_create(&dk->load_thread, &attr, bg_load_thread, req);
     pthread_attr_destroy(&attr);
+    if (rc == 0) dk->load_thread_valid = 1;
 
     if (rc != 0) {
         host_log("[dj] failed to create load thread: %d", rc);
@@ -1674,6 +1689,13 @@ static void init_deck(deck_t *dk) {
 }
 
 static void destroy_deck(deck_t *dk) {
+    if (dk->load_thread_valid) {
+        dk->load_abort.store(1, std::memory_order_release);
+        pthread_join(dk->load_thread, nullptr);
+        dk->load_thread_valid = 0;
+    }
+    for (int t = 0; t < NUM_STEMS; t++)
+        free_audio(&dk->new_tracks[t]); /* a finished load never swapped in */
     if (dk->stretcher) delete dk->stretcher;
     if (dk->grain_input) free(dk->grain_input);
     if (dk->out_buf) free(dk->out_buf);
@@ -2000,6 +2022,7 @@ static void dj_destroy(void *ptr) {
     if (inst->render_buf_a) free(inst->render_buf_a);
     if (inst->render_buf_b) free(inst->render_buf_b);
     free_playlists();
+    flush_deferred_frees();
     free(inst);
 }
 

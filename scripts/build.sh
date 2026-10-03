@@ -78,6 +78,11 @@ fi
 echo "=== Building DJ Deck Module ==="
 echo "Cross prefix: $CROSS_PREFIX"
 
+# glibc marks any DSO exporting an STB_GNU_UNIQUE symbol NODELETE, so dsp.so
+# would never unload: a reload keeps running the old image and its memory is
+# never freed. -fno-gnu-unique keeps C++ inline/template statics out of that.
+CXX_NO_UNIQUE="-fno-gnu-unique"
+
 # Create build directories
 mkdir -p build/bungee build/libxmp build/fdk-aac
 mkdir -p "dist/$MODULE_ID"
@@ -98,7 +103,7 @@ ${CROSS_PREFIX}gcc -O3 -fPIC -ffast-math -fno-finite-math-only -fno-exceptions \
 echo "Compiling Bungee library..."
 for src in $BUNGEE_DIR/src/*.cpp; do
     obj="build/bungee/$(basename "$src" .cpp).o"
-    ${CROSS_PREFIX}g++ -O3 -fPIC -std=c++20 -fwrapv \
+    ${CROSS_PREFIX}g++ -O3 -fPIC -std=c++20 -fwrapv $CXX_NO_UNIQUE \
         -I"$BUNGEE_DIR/submodules/eigen" \
         -I"$BUNGEE_DIR/submodules" \
         -I"$BUNGEE_DIR" \
@@ -228,7 +233,7 @@ if [ -z "$DISABLE_M4A" ] && [ -d "$FDKAAC_DIR/libAACdec" ]; then
     FDKAAC_OBJ_COUNT=0
     for src in $FDKAAC_SRCS; do
         obj="build/fdk-aac/$(basename "$src" .cpp).o"
-        ${CROSS_PREFIX}g++ -O2 -fPIC -std=c++11 \
+        ${CROSS_PREFIX}g++ -O2 -fPIC -std=c++11 $CXX_NO_UNIQUE \
             $FDKAAC_INCLUDES \
             -c "$src" -o "$obj" 2>/dev/null || {
                 echo "  Warning: failed to compile $(basename "$src"), skipping"
@@ -256,7 +261,7 @@ fi
 
 # --- Step 7: Compile and link DJ plugin ---
 echo "Compiling DJ plugin..."
-${CROSS_PREFIX}g++ -O3 -shared -fPIC -std=c++20 \
+${CROSS_PREFIX}g++ -O3 -shared -fPIC -std=c++20 $CXX_NO_UNIQUE \
     -I"$BUNGEE_DIR" \
     $LIBXMP_FLAGS \
     $MP3_FLAGS \
